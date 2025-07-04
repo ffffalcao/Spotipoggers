@@ -3,7 +3,6 @@ package passatempo;
 import javax.swing.*;
 import java.awt.*;
 import java.util.List;
-import java.util.ArrayList;
 import javax.swing.event.ListSelectionEvent;
 import javax.swing.event.ListSelectionListener;
 import javax.swing.ImageIcon;
@@ -14,9 +13,8 @@ public class TelaSpotipoggers extends JFrame{
     private JList<Musica> listaMusicas;
     private JProgressBar barraProgresso;
     private List<Musica> musicas;
-    private PlayerMp3 playerMP3 = new PlayerMp3();
+    private PlayerUniversal player = new PlayerUniversal();
     private boolean tocando = false;
-    private PlayerWav playerWav = new PlayerWav();
     private Timer timerProgresso;
 
     //Cria a interface gráfica.
@@ -34,11 +32,16 @@ public class TelaSpotipoggers extends JFrame{
     add(capaLabel, BorderLayout.NORTH);
 
     //Lista de músicas.
-    //Aqui é basicamente um vetor de strings que vai ser exibido na lista.
-    musicas = new ArrayList<>();
-    musicas.add(new Musica("Música 1", "Artista 1", "caminho/para/musica1.mp3", "caminho/para/capa1.jpg"));
-    musicas.add(new Musica("Música 2", "Artista 2", "caminho/para/musica2.mp3", "caminho/para/capa2.jpg"));
-    musicas.add(new Musica("Música 3", "Artista 3", "caminho/para/musica3.mp3", "caminho/para/capa3.jpg"));
+    //Carrega automaticamente as músicas da pasta especificada
+    String pastaMusicas = "C:/Users/cnoel/Music"; // Ajuste este caminho
+    musicas = CarregadorMusicas.carregarDaPasta(pastaMusicas);
+    
+    // Se não encontrar músicas, cria algumas de exemplo
+    if (musicas.isEmpty()) {
+        musicas.add(new Musica("Música 1", "Artista 1", "caminho/para/musica1.mp3", "caminho/para/capa1.jpg"));
+        musicas.add(new Musica("Música 2", "Artista 2", "caminho/para/musica2.mp3", "caminho/para/capa2.jpg"));
+        musicas.add(new Musica("Música 3", "Artista 3", "caminho/para/musica3.mp3", "caminho/para/capa3.jpg"));
+    }
 
     DefaultListModel<Musica> model = new DefaultListModel<>();
     for(Musica m : musicas){
@@ -54,15 +57,26 @@ public class TelaSpotipoggers extends JFrame{
     playPauseButton = new JButton("Toca essa porra");
     playPauseButton.addActionListener(e -> {
         Musica selecionada = listaMusicas.getSelectedValue();
-        if (selecionada != null){
-            if (tocando){
-                playerMP3.tocar(selecionada.getCaminhoArquivo());
+        if (selecionada != null) {
+            if (!tocando) {
+                player.tocar(selecionada.getCaminhoArquivo());
                 playPauseButton.setText("Pausar");
                 tocando = true;
+                
+                // Atualiza barra de progresso (só para WAV/FLAC/OGG)
+                long duracao = player.getDuracao(selecionada.getCaminhoArquivo());
+                if (duracao > 0) {
+                    barraProgresso.setMaximum((int) duracao);
+                    timerProgresso = new Timer(100, ev -> {
+                        barraProgresso.setValue((int) player.getPosicao(selecionada.getCaminhoArquivo()));
+                    });
+                    timerProgresso.start();
+                }
             } else {
-                playerMP3.parar();
-                playPauseButton.setText("Reproduzir");
+                player.parar();
+                playPauseButton.setText("Tocar");
                 tocando = false;
+                if (timerProgresso != null) timerProgresso.stop();
             }
         }
     });

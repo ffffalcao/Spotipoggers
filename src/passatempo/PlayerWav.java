@@ -22,4 +22,12 @@ public class PlayerWav {
             clip.stop();
         }
     }
+    
+    public long getDuracao() {
+        return clip != null ? clip.getMicrosecondLength() / 1000 : 0;
+    }
+    
+    public long getPosicao() {
+        return clip != null ? clip.getMicrosecondPosition() / 1000 : 0;
+    }
 }
