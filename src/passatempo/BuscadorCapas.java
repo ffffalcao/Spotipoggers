@@ -10,14 +10,17 @@ import java.net.URI;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import javax.swing.ImageIcon;
 
 public class BuscadorCapas {
-    // MusicBrainz API para buscar o MBID do release
-    private static final String MUSICBRAINZ_API = "https://musicbrainz.org/ws/2/recording/?fmt=json&limit=1&query=";
-    // Cover Art Archive para buscar a capa pelo MBID do release
-    private static final String COVERART_API = "https://coverartarchive.org/release/";
+    // MusicBrainz API para buscar o MBID do release (limit=5 para mais opções)
+    private static final String MUSICBRAINZ_API = "https://musicbrainz.org/ws/2/recording/?fmt=json&limit=5&query=";
+    // Cover Art Archive endpoints
+    private static final String COVERART_RELEASE = "https://coverartarchive.org/release/";
+    private static final String COVERART_RELEASE_GROUP = "https://coverartarchive.org/release-group/";
 
     private static final File PASTA_CACHE = new File(
         System.getProperty("java.io.tmpdir"), "spotipoggers-capas");
@@ -83,49 +86,34 @@ public class BuscadorCapas {
                 mbIs.close();
                 mbConn.disconnect();
 
-                String releaseId = extrairReleaseId(mbJson);
-                if (releaseId == null) {
+                // 2. Extrair todos os IDs (release-groups e releases)
+                List<String[]> ids = extrairTodosIds(mbJson);
+                if (ids.isEmpty()) {
                     System.out.println("[BuscadorCapas] Nenhum release encontrado no MusicBrainz");
                     return;
                 }
-                System.out.println("[BuscadorCapas] Release MBID: " + releaseId);
+                System.out.println("[BuscadorCapas] Encontrados " + ids.size() + " IDs para tentar");
 
-                // 2. Busca a capa no Cover Art Archive
-                String coverUrl = COVERART_API + releaseId + "/front-500";
-                System.out.println("[BuscadorCapas] Buscando capa em: " + coverUrl);
+                // 3. Tentar release-groups primeiro (maior chance de ter capa)
+                byte[] imgData = null;
+                for (String[] par : ids) {
+                    String tipo = par[0]; // "release-group" ou "release"
+                    String id = par[1];
+                    String baseUrl = tipo.equals("release-group") ? COVERART_RELEASE_GROUP : COVERART_RELEASE;
+                    String coverUrl = baseUrl + id + "/front-500";
+                    System.out.println("[BuscadorCapas] Tentando " + tipo + ": " + coverUrl);
 
-                URL imgUrl = URI.create(coverUrl).toURL();
-                HttpURLConnection imgConn = (HttpURLConnection) imgUrl.openConnection();
-                imgConn.setRequestProperty("User-Agent", "Spotipoggers/1.0");
-                imgConn.setConnectTimeout(8000);
-                imgConn.setReadTimeout(15000);
-                imgConn.setInstanceFollowRedirects(true);
-
-                int status = imgConn.getResponseCode();
-                // Cover Art Archive redireciona (3xx) para a imagem real
-                if (status >= 300 && status < 400) {
-                    String location = imgConn.getHeaderField("Location");
-                    imgConn.disconnect();
-                    if (location != null) {
-                        imgUrl = URI.create(location).toURL();
-                        imgConn = (HttpURLConnection) imgUrl.openConnection();
-                        imgConn.setRequestProperty("User-Agent", "Spotipoggers/1.0");
-                        imgConn.setConnectTimeout(8000);
-                        imgConn.setReadTimeout(15000);
-                        status = imgConn.getResponseCode();
+                    imgData = baixarImagem(coverUrl);
+                    if (imgData != null) {
+                        System.out.println("[BuscadorCapas] Capa encontrada via " + tipo + " " + id);
+                        break;
                     }
                 }
 
-                if (status != 200) {
-                    System.out.println("[BuscadorCapas] Cover Art Archive retornou status: " + status);
-                    imgConn.disconnect();
+                if (imgData == null) {
+                    System.out.println("[BuscadorCapas] Nenhuma capa encontrada em nenhum ID");
                     return;
                 }
-
-                InputStream imgIs = imgConn.getInputStream();
-                byte[] imgData = imgIs.readAllBytes();
-                imgIs.close();
-                imgConn.disconnect();
 
                 // Salva no cache
                 try (OutputStream os = new FileOutputStream(arquivoCache)) {
@@ -147,48 +135,135 @@ public class BuscadorCapas {
         t.start();
     }
 
-    private static String extrairReleaseId(String json) {
-        // Busca o primeiro "releases":[{"id":"<MBID>"
-        String marcador = "\"releases\":[{\"id\":\"";
-        int idx = json.indexOf(marcador);
-        if (idx < 0) {
-            // Tenta formato com espaço
-            marcador = "\"releases\" : [{\"id\" : \"";
-            idx = json.indexOf(marcador);
+    /**
+     * Extrai todos os release-group IDs e release IDs do JSON do MusicBrainz.
+     * Retorna pares [tipo, id] ordenados: release-groups primeiro (maior chance de capa).
+     */
+    private static List<String[]> extrairTodosIds(String json) {
+        List<String[]> releaseGroups = new ArrayList<>();
+        List<String[]> releases = new ArrayList<>();
+
+        // Busca todas as ocorrências de release-group ids
+        String rgMarcador = "\"release-group\"";
+        int pos = 0;
+        while (pos < json.length()) {
+            int rgIdx = json.indexOf(rgMarcador, pos);
+            if (rgIdx < 0) break;
+            // Procura o "id" dentro deste release-group
+            int idIdx = json.indexOf("\"id\"", rgIdx + rgMarcador.length());
+            if (idIdx < 0) break;
+            // Não avançar muito (pode ser outro objeto)
+            if (idIdx - rgIdx > 50) { pos = rgIdx + rgMarcador.length(); continue; }
+            String id = extrairValorAposIdx(json, idIdx);
+            if (id != null && !jaExiste(releaseGroups, id)) {
+                releaseGroups.add(new String[]{"release-group", id});
+            }
+            pos = idIdx + 4;
         }
-        if (idx < 0) {
-            // Fallback: busca qualquer "releases" seguido de "id"
-            int relIdx = json.indexOf("\"releases\"");
-            if (relIdx >= 0) {
-                int idIdx = json.indexOf("\"id\"", relIdx);
-                if (idIdx >= 0) {
-                    int aspas1 = json.indexOf("\"", idIdx + 4);
-                    if (aspas1 >= 0) {
-                        int aspas2 = json.indexOf("\"", aspas1 + 1);
-                        if (aspas2 >= 0) {
-                            // Separa por : e pega o valor
-                            int doisPontos = json.indexOf(":", idIdx);
-                            if (doisPontos >= 0) {
-                                aspas1 = json.indexOf("\"", doisPontos);
-                                aspas2 = json.indexOf("\"", aspas1 + 1);
-                                if (aspas1 >= 0 && aspas2 > aspas1) {
-                                    String id = json.substring(aspas1 + 1, aspas2);
-                                    if (id.length() == 36 && id.contains("-")) return id;
-                                }
-                            }
-                        }
-                    }
+
+        // Busca todas as ocorrências de releases
+        String relMarcador = "\"releases\"";
+        pos = 0;
+        while (pos < json.length()) {
+            int relIdx = json.indexOf(relMarcador, pos);
+            if (relIdx < 0) break;
+            // Dentro do array de releases, pode haver múltiplos objetos com "id"
+            int arrayStart = json.indexOf("[", relIdx);
+            if (arrayStart < 0) break;
+            int arrayEnd = encontrarFimArray(json, arrayStart);
+            if (arrayEnd < 0) arrayEnd = Math.min(json.length(), arrayStart + 2000);
+
+            int searchPos = arrayStart;
+            while (searchPos < arrayEnd) {
+                int idIdx = json.indexOf("\"id\"", searchPos);
+                if (idIdx < 0 || idIdx >= arrayEnd) break;
+                String id = extrairValorAposIdx(json, idIdx);
+                if (id != null && !jaExiste(releases, id)) {
+                    releases.add(new String[]{"release", id});
+                }
+                searchPos = idIdx + 4;
+            }
+            pos = arrayEnd;
+        }
+
+        // Release-groups primeiro, depois releases
+        List<String[]> todos = new ArrayList<>();
+        todos.addAll(releaseGroups);
+        todos.addAll(releases);
+        return todos;
+    }
+
+    private static String extrairValorAposIdx(String json, int idIdx) {
+        int doisPontos = json.indexOf(":", idIdx);
+        if (doisPontos < 0) return null;
+        int aspas1 = json.indexOf("\"", doisPontos);
+        if (aspas1 < 0) return null;
+        int aspas2 = json.indexOf("\"", aspas1 + 1);
+        if (aspas2 <= aspas1) return null;
+        String val = json.substring(aspas1 + 1, aspas2);
+        // Validar formato UUID (36 chars com hífens)
+        if (val.length() == 36 && val.chars().filter(c -> c == '-').count() == 4) return val;
+        return null;
+    }
+
+    private static boolean jaExiste(List<String[]> lista, String id) {
+        for (String[] par : lista) {
+            if (par[1].equals(id)) return true;
+        }
+        return false;
+    }
+
+    private static int encontrarFimArray(String json, int start) {
+        int depth = 0;
+        for (int i = start; i < json.length(); i++) {
+            char c = json.charAt(i);
+            if (c == '[') depth++;
+            else if (c == ']') { depth--; if (depth == 0) return i; }
+        }
+        return -1;
+    }
+
+    /**
+     * Tenta baixar uma imagem de uma URL, seguindo redirecionamentos.
+     * Retorna null se falhar (404, timeout, etc).
+     */
+    private static byte[] baixarImagem(String urlStr) {
+        try {
+            URL imgUrl = URI.create(urlStr).toURL();
+            HttpURLConnection conn = (HttpURLConnection) imgUrl.openConnection();
+            conn.setRequestProperty("User-Agent", "Spotipoggers/1.0 (https://github.com/ffffalcao/Spotipoggers)");
+            conn.setConnectTimeout(8000);
+            conn.setReadTimeout(15000);
+            conn.setInstanceFollowRedirects(true);
+
+            int status = conn.getResponseCode();
+            // Cover Art Archive redireciona (3xx) para a imagem real
+            if (status >= 300 && status < 400) {
+                String location = conn.getHeaderField("Location");
+                conn.disconnect();
+                if (location != null) {
+                    imgUrl = URI.create(location).toURL();
+                    conn = (HttpURLConnection) imgUrl.openConnection();
+                    conn.setRequestProperty("User-Agent", "Spotipoggers/1.0");
+                    conn.setConnectTimeout(8000);
+                    conn.setReadTimeout(15000);
+                    status = conn.getResponseCode();
                 }
             }
+
+            if (status != 200) {
+                conn.disconnect();
+                return null;
+            }
+
+            InputStream is = conn.getInputStream();
+            byte[] data = is.readAllBytes();
+            is.close();
+            conn.disconnect();
+            return data;
+        } catch (Exception e) {
             return null;
         }
-        int inicio = idx + marcador.length();
-        int fim = json.indexOf("\"", inicio);
-        if (fim <= inicio) return null;
-        String id = json.substring(inicio, fim);
-        // Valida formato UUID
-        if (id.length() == 36 && id.contains("-")) return id;
-        return null;
     }
 
     private static ImageIcon carregarDeArquivo(File arquivo, int tamanho) {
