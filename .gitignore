@@ -1,0 +1,27 @@
+# Arquivos compilados
+*.class
+
+# Arquivos de build
+build/
+dist/
+nbproject/private/
+
+# Arquivos temporários
+*.tmp
+*.temp
+
+# Logs
+*.log
+
+# Arquivos do sistema
+.DS_Store
+Thumbs.db
+
+# Arquivos de IDE
+.vscode/
+.idea/
+*.iml
+
+# Arquivos de backup
+*.bak
+*.backup 
